@@ -2,6 +2,7 @@
 API ref: https://docs.espressif.com/projects/esp-idf/en/latest/api-reference/wifi/esp_now.html
 */
 
+#include <esp_wifi.h>
 #include <esp_now.h>
 #include <WiFi.h>
 #include <string>
@@ -11,94 +12,52 @@ API ref: https://docs.espressif.com/projects/esp-idf/en/latest/api-reference/wif
 #include "crc.h"
 
 // Global
-esp_now_peer_info_t gateway;
+esp_now_peer_info_t gateway_info;
 Message packet;
+uint8_t GatewayMacAddress[] = {0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
 
-#define CHANNEL 3
+#define CHANNEL 1
 #define PRINTSCANRESULTS 0
 #define DELETEBEFOREPAIR 0
 
+// save variable in the RTC memmory such that it doesn't get lost upon sleep
+// RTC_DATA_ATTR
+
+// esp_err_t do_firmware_upgrade()
+// {
+//     esp_http_client_config_t config = {
+//         .url = CONFIG_FIRMWARE_UPGRADE_URL,
+//         .cert_pem = (char *)server_cert_pem_start,
+//     }; 
+//     esp_err_t ret = esp_https_ota(&config);
+//     if (ret == ESP_OK) {
+//         esp_restart();
+//     } else {
+//         return ESP_FAIL;
+//     }
+//     return ESP_OK;
+// }
 
 // Init ESP Now with fallback
-void InitESPNow() {
+void InitESPNow()
+{
   WiFi.disconnect();
-  if (esp_now_init() == ESP_OK) {
+  if (esp_now_init() == ESP_OK)
     Serial.println("ESPNow Init Success");
-  }
-  else {
+    
+  else
+  {
     Serial.println("ESPNow Init Failed");
-    // Retry InitESPNow, add a counte and then restart?
+    // Retry InitESPNow, add a count and then restart?
     // InitESPNow();
     // or Simply Restart
     ESP.restart();
   }
 }
 
-// Scan for devices in AP mode
-bool ScanForAP()
+void unpair()
 {
-  int8_t n_scanResults = WiFi.scanNetworks();
-  // reset on each scan
-  bool gateway_found = false;
-  // memset(&gateway, 0, sizeof(gateway));
-
-  Serial.println("");
-  if (n_scanResults == 0)
-    Serial.println("No WiFi devices in AP Mode found");
-
-  else
-  {
-    Serial.print("Found ");
-    Serial.print(n_scanResults);
-    Serial.println(" devices ");
-    for (int i = 0; i < n_scanResults; ++i)
-    {
-      // Print SSID and RSSI for each device found
-      String SSID = WiFi.SSID(i);
-      int32_t RSSI = WiFi.RSSI(i);
-      String BSSIDstr = WiFi.BSSIDstr(i);
-
-      if (PRINTSCANRESULTS) {
-        Serial.print(i + 1);
-        Serial.print(": ");
-        Serial.print(SSID);
-        Serial.print(" (");
-        Serial.print(RSSI);
-        Serial.print(")");
-        Serial.println("");
-      }
-      delay(10);
-      // Check if the current device starts with `Gateway`
-      if (SSID.indexOf("Gateway") == 0)
-      {
-        // SSID of interest
-        Serial.println("Found the gateway");
-        Serial.print(i + 1); Serial.print(": "); Serial.print(SSID); Serial.print(" ["); Serial.print(BSSIDstr); Serial.print("]"); Serial.print(" ("); Serial.print(RSSI); Serial.print(")"); Serial.println("");
-        // Get BSSID => Mac Address of the Gateway
-        int mac[6];
-        if ( 6 == sscanf(BSSIDstr.c_str(), "%x:%x:%x:%x:%x:%x%c",  &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5] ) )
-          for (int k = 0; k < 6; ++k )
-            gateway.peer_addr[k] = (uint8_t) mac[k];
-
-        gateway.channel = CHANNEL; // pick a channel
-        gateway.encrypt = 0; // no encryption
-
-        // clean up ram
-        WiFi.scanDelete();
-
-        // As soon as the gateway is found stop searching
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-void deletePeer()
-{
-  const esp_now_peer_info_t *peer = &gateway;
-  const uint8_t *peer_addr = gateway.peer_addr;
+  const uint8_t *peer_addr = gateway_info.peer_addr;
   esp_err_t delStatus = esp_now_del_peer(peer_addr);
   Serial.print("Gateway Delete Status: ");
   if (delStatus == ESP_OK)
@@ -113,52 +72,40 @@ void deletePeer()
     Serial.println("Not sure what happened");
 }
 
-// Check if the gateway is already paired with the node.
-// If not, pair the gateway with the node.
 bool pair()
 {
-  if (DELETEBEFOREPAIR)
-    deletePeer();
+  for (int k = 0; k < 6; ++k )
+    gateway_info.peer_addr[k] = (uint8_t) GatewayMacAddress[k]; // predefined MAC address
+  gateway_info.channel = CHANNEL; // pick a channel
+  gateway_info.encrypt = 0; // no encryption
 
-  Serial.print("Gateway Status: ");
-  const esp_now_peer_info_t *peer = &gateway;
-  const uint8_t *peer_addr = gateway.peer_addr;
-  // check if the peer exists
-  if ( esp_now_is_peer_exist(peer_addr) )
-  {
-    // already paired.
-    Serial.println("Already Paired");
-    return true;
-  }
-  else
-  {
-    // not paired, attempt pair
-    esp_err_t peerStatus = esp_now_add_peer(peer);
+  const esp_now_peer_info_t *peer = &gateway_info;
+  // pair
+  esp_err_t peerStatus = esp_now_add_peer(peer);
 
-    switch(peerStatus)
-    {
-      case ESP_OK:
-        Serial.println("Pair success");
-        return true;
-      case ESP_ERR_ESPNOW_NOT_INIT:
-        Serial.println("ESPNOW Not Init");
-        return false;
-      case ESP_ERR_ESPNOW_ARG:
-        Serial.println("Invalid Argument");
-        return false;
-      case ESP_ERR_ESPNOW_FULL:
-        Serial.println("Peer list full");
-        return false;
-      case ESP_ERR_ESPNOW_NO_MEM:
-        Serial.println("Out of memory");
-        return false;
-      case ESP_ERR_ESPNOW_EXIST:
-        Serial.println("Peer Exists");
-        return true;
-      default:
-        Serial.println("Not sure what happened");
-        return false;
-    }
+  switch(peerStatus)
+  {
+    case ESP_OK:
+      Serial.println("Pair success");
+      return true;
+    case ESP_ERR_ESPNOW_NOT_INIT:
+      Serial.println("ESPNOW Not Init");
+      return false;
+    case ESP_ERR_ESPNOW_ARG:
+      Serial.println("Invalid Argument");
+      return false;
+    case ESP_ERR_ESPNOW_FULL:
+      Serial.println("Peer list full");
+      return false;
+    case ESP_ERR_ESPNOW_NO_MEM:
+      Serial.println("Out of memory");
+      return false;
+    case ESP_ERR_ESPNOW_EXIST:
+      Serial.println("Peer Exists");
+      return true;
+    default:
+      Serial.println("Not sure what happened");
+      return false;
   }
 }
 
@@ -167,28 +114,27 @@ void sendData(const void *data, uint16_t siz)
 {
   const uint8_t *data_ptr = (const uint8_t*) data;
 
-  const uint8_t *peer_addr = gateway.peer_addr;
+  // const uint8_t *peer_addr = gateway.peer_addr;
+  const uint8_t *peer_addr = &GatewayMacAddress[0];
   // Serial.print("Sending: "); Serial.println(data);
   // esp_err_t result = esp_now_send(peer_addr, &data, sizeof(data));
   esp_err_t result = esp_now_send(peer_addr, data_ptr, siz);
 
   Serial.print("Send Status: ");
-  if (result == ESP_OK) {
+  if (result == ESP_OK)
     Serial.println("Success");
-  } else if (result == ESP_ERR_ESPNOW_NOT_INIT) {
-    // How did we get so far!!
+  else if (result == ESP_ERR_ESPNOW_NOT_INIT)
     Serial.println("ESPNOW not Init.");
-  } else if (result == ESP_ERR_ESPNOW_ARG) {
+  else if (result == ESP_ERR_ESPNOW_ARG)
     Serial.println("Invalid Argument");
-  } else if (result == ESP_ERR_ESPNOW_INTERNAL) {
+  else if (result == ESP_ERR_ESPNOW_INTERNAL)
     Serial.println("Internal Error");
-  } else if (result == ESP_ERR_ESPNOW_NO_MEM) {
+  else if (result == ESP_ERR_ESPNOW_NO_MEM)
     Serial.println("ESP_ERR_ESPNOW_NO_MEM");
-  } else if (result == ESP_ERR_ESPNOW_NOT_FOUND) {
+  else if (result == ESP_ERR_ESPNOW_NOT_FOUND)
     Serial.println("Peer not found.");
-  } else {
+  else
     Serial.println("Not sure what happened");
-  }
 }
 
 // callback when data is sent from Master to Slave
@@ -220,6 +166,9 @@ uint8_t CRC8(const uint8_t *data, int len)
 
 void setup()
 {
+  // disable wakeup source
+  // esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT0);
+
   delay(2000);
   Serial.begin(115200);
 
@@ -228,6 +177,7 @@ void setup()
   //Set device in STA mode to begin with
   WiFi.mode(WIFI_STA);
   Serial.println("ESPNow Node");
+
   // This is the mac address of the Node in Station Mode
   Serial.print("Node MAC: ");
   Serial.println(WiFi.macAddress());
@@ -236,39 +186,37 @@ void setup()
   // Once ESPNow is successfully Init, we will register for Send CB to
   // get the status of Trasnmitted packet
   esp_now_register_send_cb(OnDataSent);
+
+  pair();
 }
 
 void loop()
 {
-  // In the loop we scan for the gateway
-  if (ScanForAP())
-  {
-    // Add gateway as peer if it has not been added already
-    if (pair())
-    {
-      packet.seq++;
-      packet.timestamp = get_time();
-      packet.crc = 2;
+  packet.seq++;
+  packet.timestamp = get_time();
+  packet.crc = 2;
 
-      // char timestampStr[8];
-      // snprintf(timestampStr, sizeof(timestampStr), "timestamp : %"PRIu64, packet.timestamp);
-      Serial.print("Seq : ");
-      Serial.println(packet.seq);
-      Serial.print("Timestamp : ");
-      Serial.println(packet.timestamp);
-      Serial.print("CRC : ");
-      Serial.println(packet.crc);
+  // char timestampStr[8];
+  // snprintf(timestampStr, sizeof(timestampStr), "timestamp : %"PRIu64, packet.timestamp);
+  Serial.print("Seq : ");
+  Serial.println(packet.seq);
+  Serial.print("Timestamp : ");
+  Serial.println(packet.timestamp);
+  Serial.print("CRC : ");
+  Serial.println(packet.crc);
 
-      // Serial.print((const char *) timestampStr);
-      // const uint8_t *data_ptr = (const uint8_t*) packet.timestamp;
-      // packet.crc = CRC8(data_ptr, sizeof(packet.timestamp));
+  sendData(&packet, sizeof(packet));
 
-      sendData(&packet, sizeof(packet)); // Tell the gateway this node is alive
-    }
-    else
-      Serial.println("Gateway pair failed!");
-  }
-
-  // TODO: Save packet to the eeprom and sleep (turn everything off) for 5 mnts
+  // TODO: Save packet to the eeprom and sleep
   delay(3000);
+
+  // disable wifi
+  // esp_wifi_stop();
+  // // set pull down on 
+  // gpio_pulldown_en(GPIO_NUM_21);
+  // // enable wake up gpio
+  // esp_sleep_enable_ext0_wakeup(GPIO_NUM_21,1); //1 = High, 0 = Low
+
+  // // go to deep sleep
+  // esp_deep_sleep_start();
 }
